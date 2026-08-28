@@ -1,0 +1,9 @@
+# dumpall 文件默认值（仅在 CLI 未显式指定对应参数时生效）。
+# 当前支持 time_range_hours 与 formats；其余运行参数请通过命令行指定。
+# 解析失败会以 invalid argument 报错终止，不会静默忽略。
+
+# 最近分析时间窗口（小时）；CLI --time-range 优先。代码默认 72（3 天）。
+time_range_hours = 72
+
+# 报告格式元数据；CLI --format 优先。默认全部格式。
+formats = ["jsonl", "csv", "md", "html"]

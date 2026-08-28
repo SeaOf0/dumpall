@@ -1,0 +1,1085 @@
+schema_version: 1
+rules:
+  - id: WEB-SQLI-001
+    name: SQL injection structure in HTTP request
+    category: sqli
+    severity: medium
+    source: http_access
+    description: Looks for SQLi structures that are stronger than a single SQL keyword.
+    match:
+      field: request
+      regex: '(?i)(union(?:\s|\+|%20|%09|%0a|%0d|/\*.*\*/)+select|information_schema|sleep(?:\s|%20)*\(|benchmark(?:\s|%20)*\(|(?:or|and)(?:\s|\+|%20)+(?:1|true)(?:\s|\+|%20)*(=|like))'
+    score:
+      base: 55
+      add:
+        - when:
+            status_in: [200, 201, 202, 500]
+          value: 10
+          reason: response status suggests the request reached application logic
+        - when:
+            field: same_ip_same_path_count_5m
+            gte: 3
+          value: 10
+          reason: repeated same-source probes in a 5 minute window
+    recommendation: Review surrounding requests, application errors, and affected parameter handling.
+
+  - id: WEB-RCE-001
+    name: Command execution tokens in HTTP request
+    category: rce
+    severity: high
+    source: http_access
+    match:
+      field: request
+      regex: '(?i)((;|%3b|&&|%26%26|\|\||\||%7c|%0a).{0,120}\b(whoami|id|uname|cmd(?:\.exe)?|powershell|curl|wget|certutil|bash|sh)\b|(?:cmd|command|exec|shell)=[^&]{0,160}\b(whoami|id|uname|cmd(?:\.exe)?|powershell|curl|wget|certutil|bash|sh)\b)'
+    score:
+      base: 65
+      add:
+        - when:
+            status_in: [200, 201, 202, 500]
+          value: 10
+          reason: response status is compatible with attempted execution
+        - when:
+            field: same_ip_same_path_count_5m
+            gte: 2
+          value: 10
+          reason: repeated command-execution probes
+    recommendation: Check whether a Web-facing process spawned a shell, script interpreter, or download tool near this time.
+
+  - id: WEB-LFI-001
+    name: Path traversal or local file inclusion request
+    category: lfi
+    severity: medium
+    source: http_access
+    match:
+      field: request
+      regex: '(?i)(\.\./|\.\.\\|%2e%2e%2f|%2e%2e%5c|\.\.%2f|\.\.%5c|\.%2e/|%252e%252e%252f|%252e%252e%255c|/etc/passwd|/proc/self/environ|boot\.ini|win\.ini|web\.config|\.env)'
+    score:
+      base: 55
+      add:
+        - when:
+            status_in: [200, 206, 500]
+          value: 10
+          reason: response status warrants manual review for file disclosure
+    recommendation: Confirm whether the requested path returned sensitive content or application errors.
+
+  - id: WEB-SSRF-001
+    name: External or metadata URL in request parameter
+    category: ssrf
+    severity: medium
+    source: http_access
+    match:
+      field: uri_query
+      regex: '(?i)(https?://|https?%3a%2f%2f|file://|gopher://|dict://|169\.254\.169\.254|metadata\.google\.internal|localhost|127\.0\.0\.1)'
+    score:
+      base: 55
+      add:
+        - when:
+            status_in: [200, 201, 202, 500]
+          value: 10
+          reason: response status suggests the parameter was processed
+    recommendation: Review server-side URL fetch behavior and outbound network evidence.
+
+  - id: WEB-XSS-LOW-001
+    name: Cross-site scripting payload marker
+    category: xss
+    severity: low
+    source: http_access
+    match:
+      field: request
+      regex: '(?i)(<script|%3cscript|javascript:|onerror=|onload=|alert\(|document\.cookie)'
+    score:
+      base: 35
+      add:
+        - when:
+            status_in: [200, 201, 202]
+          value: 5
+          reason: application returned a successful status
+    recommendation: Treat as low-confidence evidence unless paired with application logs or stored payload confirmation.
+
+  - id: WEB-UPLOAD-001
+    name: Suspicious upload or WebShell extension in request
+    category: upload_webshell
+    severity: medium
+    source: http_access
+    match:
+      all:
+        - field: method
+          equals: POST
+        - any:
+            - field: uri_path
+              regex: '(?i)(upload|file|avatar|attachment|media|plugin|theme)'
+            - field: request
+              regex: '(?i)(\.php[0-9]?|\.phtml|\.phar|\.jsp|\.jspx|\.asp|\.aspx|\.ashx|\.war|\.jar)(?:$|[?&\s])'
+    score:
+      base: 50
+      add:
+        - when:
+            status_in: [200, 201, 202, 302]
+          value: 10
+          reason: upload endpoint returned a success-like status
+    recommendation: Correlate with recent Web directory file changes and subsequent access to uploaded files.
+
+  - id: WEB-SCANNER-001
+    name: Scanner or broad probing fingerprint
+    category: scanner
+    severity: low
+    source: http_access
+    match:
+      any:
+        - field: user_agent
+          contains_any:
+            - sqlmap
+            - nikto
+            - acunetix
+            - nessus
+            - nuclei
+            - gobuster
+            - dirbuster
+            - zgrab
+        - field: uri_path
+          contains_any:
+            - /.git/config
+            - /.env
+            - /phpinfo.php
+            - /wp-login.php
+            - /manager/html
+            - /server-status
+        - all:
+            - status_in: [404]
+            - field: same_ip_404_count_5m
+              gte: 10
+    score:
+      base: 35
+      add:
+        - when:
+            field: same_ip_404_count_5m
+            gte: 10
+          value: 10
+          reason: many 404 responses from the same source in 5 minutes
+    recommendation: Aggregate by source IP and only escalate if paired with successful exploitation evidence.
+
+  - id: WEB-BRUTE-001
+    name: Repeated failed login or admin authentication attempt
+    category: brute_force
+    severity: low
+    source: http_access
+    match:
+      all:
+        - field: method
+          equals: POST
+        - field: uri_path
+          regex: '(?i)(login|signin|auth|admin)'
+        - status_in: [401, 403, 429]
+    score:
+      base: 35
+      add:
+        - when:
+            field: same_ip_login_fail_count_5m
+            gte: 5
+          value: 25
+          reason: repeated failed login responses from same source in 5 minutes
+    recommendation: Review authentication logs for account spray patterns and eventual success.
+
+  - id: WEB-INFOLEAK-001
+    name: Sensitive file or backup disclosure probe
+    category: info_leak
+    severity: medium
+    source: http_access
+    match:
+      field: uri_path
+      regex: '(?i)(/(?:\.env|web\.config|config\.php|database\.yml|application\.yml|backup|dump|\.git|\.svn)|\.(?:bak|old|backup|sql|zip|tar|gz)$)'
+    score:
+      base: 50
+      add:
+        - when:
+            status_in: [200, 206, 500]
+          value: 15
+          reason: response status may indicate sensitive file handling
+    recommendation: Check the actual response, file presence, and Web root exposure.
+
+  - id: WEB-FRAMEWORK-001
+    name: Framework exploitation probe
+    category: framework_probe
+    severity: medium
+    source: http_access
+    match:
+      field: request
+      regex: '(?i)(\$\{jndi:(?:ldap|rmi|dns)|/actuator(?:/env|/heapdump|/jolokia)?|/wls-wsat/|/console/login|struts2?|__viewstate|javax\.faces\.ViewState|/manager/html)'
+    score:
+      base: 60
+      add:
+        - when:
+            status_in: [200, 500]
+          value: 10
+          reason: status suggests the framework endpoint or parser may have been reached
+    recommendation: Identify the framework in use and review corresponding application and middleware logs.
+
+  - id: HOST-PROC-001
+    name: Suspicious command interpreter or download tool in process inventory
+    category: anomalous_process
+    severity: medium
+    source: process
+    match:
+      all:
+        - field: command
+          regex: '(?i)((?:^|[\\/\s])(powershell(?:\.exe)?|cmd\.exe|curl(?:\.exe)?|wget(?:\.exe)?|certutil(?:\.exe)?|bitsadmin(?:\.exe)?|ncat(?:\.exe)?|nc(?:\.exe)?)(?:\s|$)|/bin/sh|/bin/bash|python\s+-c|perl\s+-e)'
+        - any:
+            - field: record
+              regex: '(?i)(w3wp|tomcat|php-fpm|nginx|httpd|apache|node|dotnet|java|weblogic|jboss|wildfly)'
+            - field: command
+              regex: '(?i)(-enc\b|encodedcommand|frombase64string|curl(?:\.exe)?|wget(?:\.exe)?|certutil(?:\.exe)?|bitsadmin(?:\.exe)?|ncat(?:\.exe)?|nc(?:\.exe)?|python\s+-c|perl\s+-e)'
+    score:
+      base: 45
+      add:
+        - when:
+            field: record
+            regex: '(?i)(w3wp|tomcat|php-fpm|nginx|httpd|apache|node|dotnet|java|weblogic|jboss|wildfly)'
+          value: 20
+          reason: command line also references a Web-facing runtime
+    recommendation: Review parent process, start time, command line, and nearby Web requests before escalation.
+
+  - id: HOST-NET-001
+    name: Web process outbound public network connection
+    category: anomalous_network
+    severity: medium
+    source: network
+    match:
+      all:
+        - field: remote_class
+          contains_any:
+            - public
+            - public_or_other
+        - field: process_name
+          contains_any:
+            - w3wp
+            - java
+            - tomcat
+            - php-fpm
+            - node
+            - dotnet
+            - nginx
+            - httpd
+            - apache
+        - field: state
+          contains_any:
+            - established
+            - syn_sent
+    score:
+      base: 55
+      add:
+        - when:
+            field: remote_port
+            in: ["4444", "5555", "6666", "7777", "8081", "9001"]
+          value: 15
+          reason: remote port is uncommon for normal Web backend traffic
+    recommendation: Verify whether the outbound endpoint is expected for the application.
+
+  - id: HOST-PERSIST-001
+    name: Suspicious persistence command
+    category: anomalous_persistence
+    severity: medium
+    source: persistence
+    match:
+      any:
+        - field: command
+          regex: '(?i)((?:^|[\\/\s])(powershell(?:\.exe)?|cmd\.exe|curl(?:\.exe)?|wget(?:\.exe)?|certutil(?:\.exe)?|bitsadmin(?:\.exe)?|ncat(?:\.exe)?|nc(?:\.exe)?)(?:\s|$)|/bin/sh|/bin/bash|base64|frombase64string)'
+        - field: path
+          regex: '(?i)(\\temp\\|/tmp/|/dev/shm)'
+    score:
+      base: 60
+      add:
+        - when:
+            field: persistence_type
+            in: ["scheduled_task", "startup_item"]
+          value: 10
+          reason: command appears in an auto-start location
+    recommendation: Review task, startup item, or service origin and creation time without modifying it.
+
+  - id: DB-AUTH-FAIL-001
+    name: Database authentication failure evidence
+    category: db_auth_failure
+    severity: medium
+    source: db_log
+    match:
+      field: statement_type
+      equals: auth_failure
+    score:
+      base: 45
+      add:
+        - when:
+            field: client_ip
+            regex: '\b(?:\d{1,3}\.){3}\d{1,3}\b'
+          value: 10
+          reason: database log includes a client IP for review
+    recommendation: Review adjacent database and Web authentication evidence before treating this as credential attack activity.
+
+  - id: DB-FILE-ACCESS-001
+    name: Database file read or write primitive
+    category: db_file_access
+    severity: high
+    source: db_log
+    match:
+      field: statement_type
+      in: ["file_read", "file_write"]
+    score:
+      base: 70
+      add:
+        - when:
+            field: statement_type
+            equals: file_write
+          value: 10
+          reason: database statement attempts file write capability
+    recommendation: Check whether the database account should be able to access server files and correlate with Web root changes.
+
+  - id: DB-DELAY-001
+    name: Database delay function or timing primitive
+    category: db_delay
+    severity: medium
+    source: db_log
+    match:
+      field: statement_type
+      equals: delay
+    score:
+      base: 55
+      add:
+        - when:
+            field: duration_ms
+            gte: 5000
+          value: 10
+          reason: logged duration is consistent with a timing probe
+    recommendation: Correlate with SQL injection HTTP requests and application response-time anomalies.
+
+  - id: DB-PRIV-CHANGE-001
+    name: Database privilege or account change statement
+    category: db_privilege_change
+    severity: high
+    source: db_log
+    match:
+      field: statement_type
+      equals: privilege_change
+    score:
+      base: 70
+    recommendation: Verify whether this database account or role change is expected maintenance activity.
+
+  - id: DB-CODE-EXEC-001
+    name: Database command execution or extension primitive
+    category: db_code_execution
+    severity: high
+    source: db_log
+    match:
+      field: statement_type
+      equals: code_execution
+    score:
+      base: 75
+    recommendation: Review whether the database feature or stored procedure is expected and correlate with host process evidence.
+
+  - id: DB-ENUM-001
+    name: Database metadata enumeration statement
+    category: db_enumeration
+    severity: low
+    source: db_log
+    match:
+      field: statement_type
+      equals: enumeration
+    score:
+      base: 40
+    recommendation: Treat metadata enumeration as weak evidence unless paired with Web SQLi or privilege/file access activity.
+
+  - id: DB-LINKED-SERVER-001
+    name: SQL Server linked server access primitive
+    category: db_linked_server
+    severity: medium
+    source: db_log
+    match:
+      field: statement_type
+      equals: linked_server
+    score:
+      base: 55
+    recommendation: Review whether linked-server access is expected for this application account.
+
+  - id: WAF-BLOCK-001
+    name: WAF or CDN blocked suspicious Web request
+    category: waf_block
+    severity: low
+    source: waf_log
+    match:
+      any:
+        - field: action
+          in: ["block", "challenge"]
+        - field: waf_rule_name
+          regex: '(?i)(sqli|sql injection|rce|command|path traversal|xss|webshell|deserialization)'
+    score:
+      base: 35
+      add:
+        - when:
+            field: action
+            equals: block
+          value: 10
+          reason: WAF action indicates the request was blocked
+        - when:
+            field: waf_score
+            gte: 80
+          value: 10
+          reason: WAF anomaly or risk score is high
+    recommendation: Treat WAF/CDN activity as context; review whether later Web or application evidence suggests bypass or impact.
+
+  - id: WAF-SUSPICIOUS-ALLOW-001
+    name: WAF logged suspicious request without blocking
+    category: waf_suspicious_allow
+    severity: low
+    source: waf_log
+    match:
+      all:
+        - field: action
+          in: ["allow", "log", "pass"]
+        - any:
+            - field: waf_rule_name
+              regex: '(?i)(sqli|sql injection|rce|command|path traversal|xss|webshell|deserialization)'
+            - field: path
+              regex: '(?i)(\.\./|%2e%2e|/\.env|/wp-login\.php|/actuator|/manager/html)'
+    score:
+      base: 40
+    recommendation: Check adjacent access logs and application errors to determine whether this logged request reached vulnerable code.
+
+  - id: APP-EXCEPTION-001
+    name: Application error or exception evidence
+    category: app_exception
+    severity: medium
+    source: app_log
+    match:
+      any:
+        - field: level
+          in: ["error", "fatal", "critical"]
+        - field: exception_type
+          regex: '(?i)(Exception|Error|Throwable)$'
+    score:
+      base: 45
+      add:
+        - when:
+            field: http_path
+            regex: '^/'
+          value: 10
+          reason: application error includes an HTTP path for correlation
+    recommendation: Correlate the exception with HTTP status 500, source IP, request ID, and database or file evidence.
+
+  - id: APP-SQL-ERROR-001
+    name: Application database error evidence
+    category: app_sql_error
+    severity: medium
+    source: app_log
+    match:
+      any:
+        - field: exception_type
+          regex: '(?i)(SQL|JDBC|PDO|Npgsql|SqlClient|Database).*(Exception|Error)?'
+        - field: message_summary
+          regex: '(?i)(SQLSTATE|syntax error|database error|duplicate key|ORA-\d+|mysql|postgres|sql server)'
+    score:
+      base: 55
+      add:
+        - when:
+            field: http_path
+            regex: '^/'
+          value: 10
+          reason: SQL-related application error includes an HTTP path
+    recommendation: Review nearby SQL injection requests and database logs; this is suspicious evidence, not proof of exploitation.
+
+  - id: APP-SSRF-ERROR-001
+    name: Application outbound request or SSRF-style error
+    category: app_ssrf_error
+    severity: medium
+    source: app_log
+    match:
+      field: message_summary
+      regex: '(?i)(connection timed out|connection refused|unknown host|dns|metadata\.google\.internal|169\.254\.169\.254|java\.net\.|http client|requests\.exceptions)'
+    score:
+      base: 50
+    recommendation: Correlate with SSRF-like HTTP parameters and outbound network evidence before escalation.
+
+  - id: APP-DESERIALIZATION-001
+    name: Application deserialization or framework parser error
+    category: app_deserialization
+    severity: medium
+    source: app_log
+    match:
+      any:
+        - field: exception_type
+          regex: '(?i)(InvalidClassException|SerializationException|JsonMappingException|ViewStateException|ObjectInputStream)'
+        - field: message_summary
+          regex: '(?i)(deserialize|deserialization|ObjectInputStream|ysoserial|viewstate|fastjson|jackson)'
+    score:
+      base: 60
+    recommendation: Compare with framework probe requests and review whether the exception is expected for normal traffic.
+
+  # ---- Linux 主机痕迹检测（triage 扩展）----
+
+  - id: HOST-LINUX-HISTORY-001
+    name: Suspicious shell history command
+    category: host_history
+    severity: medium
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)(curl|wget)[^;|]*(;|\|)\s*(ba)?sh|curl[^;|]*\|\s*(ba)?sh'
+        - field: command
+          regex: '(?i)/dev/tcp/|bash\s+-i\s+>&|nc\s+[^ ]*\s+-e\s|socat[^ ]*exec'
+        - field: command
+          regex: '(?i)base64\s+(-d|-D|--decode)'
+        - field: command
+          regex: '(?i)(chmod|chown)[^;]*(\+x|777)[^;]*(/tmp|/dev/shm|/var/tmp)'
+        - field: command
+          regex: '(?i)history\s+-c|unset\s+HISTFILE|set\s+\+o\s+history|shred[^ ]*\s+[^ ]*history'
+        - field: command
+          regex: '(?i)(>>?\s*)?[^ ]*(authorized_keys|sudoers|ld\.so\.preload|crontab)'
+        - field: command
+          regex: '(?i)(python|perl|php)\s+-[cr]\s'
+    score:
+      base: 62
+      add:
+        - when:
+            field: command
+            regex: '(?i)(/dev/tcp/|bash\s+-i\s+>&|nc\s+[^ ]*\s+-e\s)'
+          value: 15
+          reason: reverse shell indicator in history
+        - when:
+            field: command
+            regex: '(?i)(history\s+-c|unset\s+HISTFILE|shred)'
+          value: 10
+          reason: anti-forensic history wiping
+    recommendation: Review the full command context and nearby logins for this user before escalation.
+
+  - id: HOST-LINUX-PERSIST-MISC-001
+    name: High-signal Linux persistence artifact
+    category: anomalous_persistence
+    severity: high
+    source: persistence
+    match:
+      any:
+        - field: kind
+          contains: ld_so_preload
+        - field: kind
+          contains: pam_unusual_module
+        - field: kind
+          contains: python_pth
+        - field: detail
+          regex: '(?i)(/dev/tcp/|bash\s+-i|base64\s+-d|nc\s+-e|curl[^|]*\|)'
+        - field: kind
+          contains: tcp_wrapper
+    score:
+      base: 70
+      add:
+        - when:
+            field: flag
+            contains: high_signal
+          value: 10
+          reason: artifact class is a classic backdoor location
+    recommendation: Compare with package ownership and baseline; treat unexpected preload/PAM/pth entries as suspicious.
+
+  - id: HOST-LINUX-SUDO-001
+    name: Risky sudoers grant
+    category: privilege_abuse
+    severity: high
+    source: sudoers
+    match:
+      any:
+        - field: flags
+          contains: nopasswd
+        - field: flags
+          contains: full_grant
+    score:
+      base: 66
+      add:
+        - when:
+            field: flags
+            contains: full_grant
+          value: 12
+          reason: full ALL grant amplifies any foothold
+    recommendation: Confirm the grant is intended; check mtime against the incident window.
+
+  - id: HOST-LINUX-SSH-001
+    name: Suspicious SSH key or sshd configuration
+    category: ssh_persistence
+    severity: high
+    source: ssh_keys
+    match:
+      any:
+        - field: detail
+          regex: '(?i)^(from=|command=|no-pty|permitopen)'
+        - field: detail
+          regex: '(?i)^options_prefix'
+    score:
+      base: 60
+    recommendation: Review the authorized_keys line, its mtime, and the owning account.
+
+  - id: HOST-LINUX-SSHD-001
+    name: Risky sshd_config directive
+    category: ssh_persistence
+    severity: medium
+    source: sshd_config
+    match:
+      any:
+        - field: flag
+          contains: non_default_authorized_keys_file
+        - field: flag
+          contains: authorized_keys_command_configured
+        - field: flag
+          contains: force_command_configured
+        - field: flag
+          contains: empty_password_allowed
+        - field: flag
+          contains: trusted_user_ca_configured
+    score:
+      base: 58
+    recommendation: Verify whether the directive was recently introduced and matches policy.
+
+  - id: HOST-LINUX-DELETED-001
+    name: Process running from a deleted executable
+    category: anomalous_process
+    severity: high
+    source: deleted_open
+    match:
+      any:
+        - field: record
+          regex: '.+'
+    score:
+      base: 72
+      add:
+        - when:
+            field: record
+            regex: '(?i)(/tmp/|/dev/shm/|/var/tmp/)'
+          value: 10
+          reason: deleted binary was staged in a temp directory
+    recommendation: Capture /proc/<pid> details and hash memory mappings before the process exits.
+
+  - id: HOST-LINUX-SUID-001
+    name: SUID/SGID binary in a staging location
+    category: privilege_abuse
+    severity: medium
+    source: suid_file
+    match:
+      all:
+        - field: record
+          regex: '(?i)/tmp/|/dev/shm/|/var/tmp/|/home/|/var/www/'
+    score:
+      base: 64
+    recommendation: Verify package ownership; SUID binaries outside system directories are suspicious.
+
+  - id: HOST-LINUX-LOGIN-001
+    name: Off-hours or rare-host interactive login
+    category: anomalous_login
+    severity: low
+    source: login_history
+    match:
+      any:
+        - field: record_type
+          equals: user_process
+        - field: record_type
+          equals: last_login
+    score:
+      base: 20
+    recommendation: Cross-check the login time and source address against wtmp/btmp context and expected access.
+
+  # ---- Windows 主机痕迹检测（triage 扩展）----
+
+  - id: HOST-WIN-REGPERSIST-001
+    name: Suspicious registry persistence entry
+    category: anomalous_persistence
+    severity: high
+    source: registry_persistence
+    match:
+      any:
+        - field: value
+          regex: '(?i)(\\\\temp\\\\|\\\\users\\\\public\\\\|\\\\programdata\\\\|\\\\appdata\\\\|powershell(?:\.exe)?\s+-|cmd\.exe\s+/c|rundll32|regsvr32|mshta|wscript|cscript)'
+        - field: category
+          contains_any: [winlogon, appinit, appcert, ifeo, lsa, print_monitor, netsh_helper, winsock_nsp, network_provider, accessibility_hijack, cmd_autorun]
+        - field: value
+          regex: '(?i)^\s*$'
+    score:
+      base: 68
+      add:
+        - when:
+            field: category
+            contains: ifeo
+          value: 10
+          reason: IFEO debugger/silent-process-exit is a common hijack point
+        - when:
+            field: category
+            contains: lsa
+          value: 12
+          reason: LSA notification/security packages load into every logon session
+    recommendation: Compare with Autoruns baseline; check the value data path and its signature.
+
+  - id: HOST-WIN-WMI-001
+    name: WMI event subscription persistence
+    category: anomalous_persistence
+    severity: high
+    source: wmi_subscription
+    match:
+      any:
+        - field: class
+          contains: __CommandLineEventConsumer
+        - field: class
+          contains: __FilterToConsumerBinding
+    score:
+      base: 76
+    recommendation: Any unexpected binding in root\\subscription is high-signal; review filter query and consumer command.
+
+  - id: HOST-WIN-WMI-002
+    name: WMI event filter with script or interval trigger
+    category: anomalous_persistence
+    severity: medium
+    source: wmi_subscription
+    match:
+      all:
+        - field: class
+          equals: __EventFilter
+        - field: data
+          regex: '(?i)(Interval|ScriptText|SELECT\s+\*\s+FROM\s+__Instance)'
+    score:
+      base: 55
+    recommendation: Review the filter query language and consumer binding pair.
+
+  # ---- 场景化规则（横向/隧道/勒索/远控/挖矿）----
+
+  - id: HOST-PROC-TUNNEL-001
+    name: Tunnel or proxy tool process
+    category: tunnel
+    severity: high
+    source: process
+    match:
+      any:
+        - field: command
+          regex: '(?i)(frpc|frps|/nps |/nps$|chisel|gost|iox|earthworm|\bew\b|termite|sunny\-?client|ngrok|regeorg|tunna|dns2tcp|iodine|pproxy|ssf|ssocks|rssocks|lcx(?:\.exe)?)'
+        - field: name
+          regex: '(?i)^(frpc|frps|nps|chisel|gost|iox|ew|termite|ngrok|iodine|dns2tcp)(?:\.exe)?$'
+        - field: command
+          regex: '(?i)ssh\s+[^;]*\s-[DLR]\s|^ssh\s+.*-o\s+ProxyCommand'
+        - field: command
+          regex: '(?i)(netsh\s+interface\s+portproxy|socat\s+[^;]*TCP4?-LISTEN)'
+    score:
+      base: 72
+      add:
+        - when:
+            field: command
+            regex: '(?i)(\d+\.\d+\.\d+\.\d+|:[0-9]{2,5})'
+          value: 8
+          reason: command embeds explicit remote endpoint
+    recommendation: Verify tunnel intent against change records; capture config files and peer endpoints.
+
+  - id: HOST-RANSOM-PREP-001
+    name: Ransomware preparation command
+    category: ransomware
+    severity: critical
+    source: process
+    match:
+      any:
+        - field: command
+          regex: '(?i)vssadmin(?:\.exe)?\s+delete\s+shadows'
+        - field: command
+          regex: '(?i)wbadmin(?:\.exe)?\s+delete\s+(catalog|systemstatebackup)'
+        - field: command
+          regex: '(?i)bcdedit(?:\.exe)?\s+/set\s+[^ ]*\s*recoveryenabled\s+no'
+        - field: command
+          regex: '(?i)wbemfreeze|shadow\s+copy\s+delete|wmic\s+shadowcopy\s+delete'
+    score:
+      base: 90
+    recommendation: Volume shadow deletion is classic ransomware preparation; treat as critical and validate with file-extension sweep.
+
+  - id: HOST-HISTORY-RANSOM-001
+    name: Ransomware preparation in shell history
+    category: ransomware
+    severity: critical
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)vssadmin.*delete\s+shadows|wbadmin.*delete\s+(catalog|systemstatebackup)|bcdedit.*recoveryenabled\s+no'
+        - field: command
+          regex: '(?i)(chmod|find|mv).*(\*\.(php|jpg|txt|docx?)|/var/www|/home)\s.*\.(locked|encrypted|crypt)'
+    score:
+      base: 88
+    recommendation: History shows ransomware-style mass operations; check timestamps and acting account.
+
+  - id: HOST-RMT-TOOL-001
+    name: Remote-control software on server
+    category: remote_access_tool
+    severity: high
+    source: process
+    match:
+      any:
+        - field: name
+          regex: '(?i)^(todesk|rundll32.*todesk|sunloginclient|rustdesk|anydesk|teamviewer(?:_service)?|rserver3|radmin|gotorpc|netsupport|tv_w32|goha)(?:\.exe)?$'
+        - field: command
+          regex: '(?i)(ToDesk|RustDesk|SunloginClient|AnyDesk|TeamViewer|rserver3|Radmin|GoToHTTP|NetSupport)[\\/ ]'
+        - field: executable_path
+          regex: '(?i)(ToDesk|RustDesk|SunLogin|AnyDesk|TeamViewer|Radmin|GoToHTTP|NetSupport)'
+    score:
+      base: 68
+      add:
+        - when:
+            field: command
+            regex: '(?i)(--pass|password|unattended)'
+          value: 10
+          reason: unattended-access flag on remote tool
+    recommendation: Unexpected remote-control tools on servers are a common fraud-trojan delivery (e.g. Silver-Fox style); verify installer origin and config files.
+
+  - id: HOST-RMT-REG-001
+    name: Remote-control tool persistence in registry
+    category: remote_access_tool
+    severity: high
+    source: registry_persistence
+    match:
+      any:
+        - field: value
+          regex: '(?i)(ToDesk|SunLogin|RustDesk|AnyDesk|TeamViewer|rserver3|Radmin|GoToHTTP|NetSupport)'
+        - field: path
+          regex: '(?i)(ToDesk|SunLogin|RustDesk|AnyDesk|TeamViewer|rserver3|Radmin)'
+    score:
+      base: 64
+    recommendation: Remote-control autostart entry; confirm whether it was installed with authorization.
+
+  - id: HOST-NET-MINING-001
+    name: Connection to common mining pool port
+    category: cryptomining
+    severity: high
+    source: network
+    match:
+      all:
+        - field: remote_port
+          in: ["3333", "4444", "5555", "7777", "8888", "8889", "9999", "14433", "14444", "14441", "14442", "8899", "45700"]
+        - field: state
+          contains_any: [established, syn_sent]
+    score:
+      base: 70
+      add:
+        - when:
+            field: record
+            regex: '(?i)(stratum|xmr|monero|pool\.)'
+          value: 12
+          reason: command or hostname references mining
+    recommendation: Verify the destination is a sanctioned mining pool before escalation.
+
+  - id: HOST-FW-NAT-001
+    name: Firewall NAT or port-forward rule
+    category: lateral_movement
+    severity: medium
+    source: firewall
+    match:
+      any:
+        - field: line
+          regex: '(?i)(-t nat|REDIRECT|DNAT|MASQUERADE|portproxy|listenaddress=)'
+    score:
+      base: 58
+      add:
+        - when:
+            field: line
+            regex: '(?i)(4444|5555|8080|8888|1080|8443)'
+          value: 10
+          reason: forwarded port is a common tooling port
+    recommendation: Confirm NAT/forwarding rules are expected infrastructure, not attacker relay.
+
+  - id: HOST-HISTORY-TUNNEL-001
+    name: Tunnel or proxy tool in shell history
+    category: tunnel
+    severity: high
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)(frpc|frps|chisel|gost|iox|earthworm|termite|ngrok|regeorg|tunna|dns2tcp|iodine|pproxy|ssocks|rssocks|lcx|sunny\-?client)'
+        - field: command
+          regex: '(?i)ssh\s+[^;]*\s-[DLR]\s+\S+|socat\s+[^;]*TCP4?-LISTEN|netsh\s+interface\s+portproxy'
+    score:
+      base: 70
+      add:
+        - when:
+            field: command
+            regex: '(?i)(\d+\.\d+\.\d+\.\d+|:[0-9]{2,5})'
+          value: 10
+          reason: tunnel command references a remote address or port
+    recommendation: Correlate the tunnel command time window with process, network, and login evidence.
+
+  - id: HOST-HISTORY-SCAN-001
+    name: Internal network scanning tool in shell history
+    category: scanner
+    severity: medium
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)\bfscan\b|\bkscan\b|\bgoby\b|\bladon\b|\bmsfconsole\b|\bnetspy\b|\btscan\b'
+        - field: command
+          regex: '(?i)\b(nmap|masscan|zmap|rustscan)\b[^;|]*(\s-[pPsS][0-9,\-/:]+|\s+(\d{1,3}\.){3}\d{1,3})'
+    score:
+      base: 62
+      add:
+        - when:
+            field: command
+            regex: '(?i)(\d{1,3}\.){3}\d{1,3}(/\d{1,2})?'
+          value: 8
+          reason: scan command targets an address or CIDR range
+    recommendation: Confirm whether the scan was authorized; correlate with auth failure spikes on peer hosts.
+
+  - id: HOST-HISTORY-DOWNLOAD-001
+    name: Direct-IP download in shell history
+    category: host_history
+    severity: medium
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)(curl|wget|axel|aria2c)[^;|]*https?://(\d{1,3}\.){3}\d{1,3}'
+    score:
+      base: 55
+      add:
+        - when:
+            field: command
+            regex: '(?i)(/tmp/|/dev/shm/|\|\s*(ba)?sh|>\s*/dev/null)'
+          value: 12
+          reason: download lands in a staging path or pipes into a shell
+    recommendation: Review the downloaded artifact hash and the execution chain that followed.
+
+
+  # ---- 主机侧扩展检测规则 ----
+
+  - id: HOST-PROC-MEMFD-001
+    name: Fileless process running from memfd
+    category: anomalous_process
+    severity: high
+    source: process
+    match:
+      any:
+        - field: name
+          regex: '(?i)memfd:'
+        - field: command
+          regex: '(?i)memfd:'
+    score:
+      base: 75
+    recommendation: Memory-backed execution leaves no on-disk binary; capture memory and inspect the process.
+
+  - id: HOST-NET-BACKDOOR-001
+    name: Connection to known backdoor port
+    category: anomalous_network
+    severity: medium
+    source: network
+    match:
+      all:
+        - field: remote_port
+          in: ["1524", "1984", "2006", "6666", "6667", "6668", "6669", "7000", "13000", "14856", "25000", "29812", "31337", "32982", "33369", "47107", "47018", "60922", "62883"]
+        - field: state
+          contains_any: [established, syn_sent]
+    score:
+      base: 65
+    recommendation: Verify the peer and process; these ports match classic backdoor port lists.
+
+  - id: HOST-NET-EXFIL-001
+    name: Transfer to public file-sharing service
+    category: info_leak
+    severity: medium
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)(curl|wget)[^;|]*(pastebin\.com|transfer\.sh|mega\.nz|anonfiles\.com|wetransfer\.com|0x0\.st|file\.io|catbox\.moe|gofile\.io)'
+        - field: command
+          regex: '(?i)(curl|wget)[^;|]*(\s-T\s|\s--upload-file\s|\s-F\s)'
+    score:
+      base: 60
+    recommendation: Correlate the transferred artifact with data-access evidence in the same window.
+
+  - id: HOST-HISTORY-LATERAL-001
+    name: SSH lateral movement options in history
+    category: lateral_movement
+    severity: medium
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)StrictHostKeyChecking\s*=\s*no|UserKnownHostsFile\s*=\s*/dev/null'
+        - field: command
+          regex: '(?i)\bsshpass\b'
+    score:
+      base: 58
+    recommendation: Identify the target hosts and correlate with their auth logs.
+
+  - id: HOST-HISTORY-ANTIFORENSIC-001
+    name: Anti-forensics command in history
+    category: host_history
+    severity: high
+    source: shell_history
+    match:
+      any:
+        - field: command
+          regex: '(?i)chattr[^;|]*\+i|history\s+-c|unset\s+HISTFILE|set\s+\+o\s+history'
+        - field: command
+          regex: '(?i)rm\s+-rf\s+/var/log|truncate\s+-s\s+0|shred\s+/var|logrotate\s+-f'
+    score:
+      base: 70
+    recommendation: Treat as anti-forensics evidence; inspect file timestamps and journal state around the command.
+
+  - id: HOST-KERN-COREPIPE-001
+    name: Pipe-style core_pattern persistence
+    category: anomalous_persistence
+    severity: high
+    source: kernel_params
+    match:
+      all:
+        - field: param
+          regex: '(?i)^core_pattern$'
+        - field: value
+          regex: '^\|'
+    score:
+      base: 78
+    recommendation: A core_pattern starting with a pipe hands crash handling to a program; verify the helper path on disk.
+
+  - id: HOST-FS-DOUBLEEXT-001
+    name: Double-extension masquerading file
+    category: anomalous_process
+    severity: high
+    source: fs_anomaly
+    match:
+      any:
+        - field: kind
+          regex: '^double_extension$'
+    score:
+      base: 70
+    recommendation: Masqueraded executable names warrant hash review and upload-chain correlation.
+
+  - id: HOST-FS-WORLDWRITABLE-001
+    name: World-writable directory outside temp areas
+    category: host_history
+    severity: medium
+    source: fs_anomaly
+    match:
+      any:
+        - field: kind
+          regex: '^world_writable_dir$'
+    score:
+      base: 50
+    recommendation: Confirm the directory is expected; writable paths feed privilege-escalation chains.
+
+  - id: HOST-FS-LARGEFILE-001
+    name: Recently changed large file (possible staging)
+    category: info_leak
+    severity: medium
+    source: fs_anomaly
+    match:
+      any:
+        - field: kind
+          regex: '^large_recent_file$'
+    score:
+      base: 55
+    recommendation: Large recent archives may be exfiltration staging; check content type and access times.
+
+  - id: HOST-BIN-TAMPER-001
+    name: Security-critical binary changed recently
+    category: privilege_abuse
+    severity: high
+    source: bin_change
+    match:
+      any:
+        - field: path
+          regex: '(?i)^/(usr/)?s?bin/(sshd?|sudo|su|passwd|login|shadow|ps|ss|netstat|lsof|bash|dash|zsh|curl|wget|python3?|perl|socat|nc)([.-]|$)'
+    score:
+      base: 65
+    recommendation: Cross-check with the package manager (installed_packages.csv) and package integrity output; full recent-change list stays in bin_dir_changes.csv.
